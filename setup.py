@@ -44,11 +44,11 @@ from setuptools import setup
 
 setup(
     name='AioNord',
-    version='1.0.1',
+    version='1.0.2',
     packages=['aionord'],
     url='https://github.com/ultrafunkamsterdam',
     license='MIT',
     author='UltrafunkAmsterdam',
     author_email='',
-    description='Aiohttp ClientSession Drop-In which uses the Nord VPN Network'
+    description='Drop-in for either requests.Session and aiohttp.ClientSession, which directly uses the Nord VPN Network'
 )
