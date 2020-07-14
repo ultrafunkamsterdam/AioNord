@@ -39,10 +39,11 @@ a:::::aaaa::::::a i::::::io:::::::::::::::oN::::::N       N:::::::No::::::::::::
 
 """
 
+import asyncio
 import logging
-from pprint import pformat
 
 import aiohttp
+import requests
 from aiohttp_socks import ProxyConnector, ProxyType
 
 
@@ -54,12 +55,11 @@ TYPE_SOCKS_PROXY = 'socks'
 
 
 class AioNord(aiohttp.ClientSession):
-    """
-    AioNord Main class
+    """ aiohttp.ClientSession drop-in which connects over using the current best NordVPN server
     """
     API_URL = 'https://api.nordvpn.com/v1'
     MAX_CLIENT_CONNECTIONS = 5
-
+    LOOP = asyncio.get_event_loop()
 
     def __init__(self, username, password, **kw):
         """Creates a new instance of Nord
@@ -74,6 +74,7 @@ class AioNord(aiohttp.ClientSession):
         self._servers = list()
         self._session = None
         self._current = None
+        self._used_servers = []
         super(AioNord, self).__init__(**kw)
 
 
@@ -82,43 +83,147 @@ class AioNord(aiohttp.ClientSession):
             r = await session.get(self.API_URL + '/servers')
             return map(Server, await r.json())
 
-
     async def get_best_servers(self):
         servers = await self.get_servers()
         for server in servers:
             for technology in server.technologies:
                 if technology.identifier in (TYPE_PROXY, TYPE_SOCKS_PROXY, TYPE_SSL_RROXY):
-                    if server not in self._servers:
+                    if server not in self._servers + self._used_servers:
                         self._servers.append(server)
                         self._servers = sorted(self._servers, key=lambda x: x.load)
 
 
-    async def _request(self, method, url, **kw):
+    async def change_server(self):
         if not self._servers:
             await self.get_best_servers()
-        best5 = self._servers[0:5]
-        for server in best5:
-            self._current = server
+        self._current = self._servers.pop(0)
+        self._used_servers.append(self._current)
 
-            logging.getLogger(__name__).warning('using {}'.format(server.hostname))
+
+    async def _request(self, method, url, **kw):
+        while not self._current:
+            await self.change_server()
+        server = self._current
+
+        logging.getLogger(__name__).warning('using {}'.format(server.hostname))
+        try:
+            connector = ProxyConnector(
+                proxy_type=ProxyType.HTTP,
+                host=server.hostname,
+                password=self.password,
+                username=self.username,
+                port=80,
+                verify_ssl=False)
+            self._connector = connector
+            return await super()._request(method, url, **kw)
+
+        except Exception as e:
+            logging.getLogger(__name__).exception(e, exc_info=True)
+
+
+    async def fetch(self, method, url, data=None, **kw):
+        response = await self.request(method, url, data=data, **kw)
+        return await response.text()
+
+
+    async def fetchbinary(self, method, url, data=None, **kw):
+        response = await self.request(method, url, data=data, **kw)
+        return await response.read()
+
+
+    def __getattribute__(self, item):
+        try:
+            return object.__getattribute__(self, item)
+        except AttributeError as e:
             try:
-                connector = ProxyConnector(
-                    proxy_type=ProxyType.HTTP,
-                    host=server.hostname,
-                    password=self.password,
-                    username=self.username,
-                    port=80,
-                    verify_ssl=False)
+                return super().__getattribute__(self, item)
+            except AttributeError as e:
+                raise AttributeError
 
-                self._connector = connector
-                return await super()._request(method, url, **kw)
-            except Exception as e:
-                logging.getLogger(__name__).exception(e, exc_info=True)
-                continue
+
+class Nord(requests.Session):
+    """Requests.Session drop-in. Connects using NordVPN
+
+    example:
+        ```
+        from aionord import Nord
+        session = Nord(username,password)
+        r = session.get(url)
+        _j = r.json()
+        _t = r.text
+        _b = r.content
+        req = r.request.headers
+
+    """
+    API_URL = 'https://api.nordvpn.com/v1'
+    MAX_CLIENT_CONNECTIONS = 5
+
+
+    def __init__(self, username, password, **kw):
+        """Creates a new instance of Nord
+
+        :param str username:
+        :param str password:
+        :key **kw: directly passed to aiohttp.ClientSession
+
+        """
+        super(Nord, self).__init__()
+        self.username = username
+        self.password = password
+        self._servers = list()
+        self._current = None
+        self._used_servers = []
+        self._init_done = False
+        self.__dict__.update(kw)
+        self.get_best_servers()
+
+
+    @property
+    def proxies(self):
+        if self._init_done:
+            s = self._servers[0]
+            return {'http': 'http://%s:%s@%s:%d' % (self.username, self.password, s.hostname, 80),
+                    'https': 'http://%s:%s@%s:%d' % (self.username, self.password, s.hostname, 80)
+                    }
+
+
+    @proxies.setter
+    def proxies(self, val):
+        pass
+
+
+    def get_servers(self):
+        with self.get(self.API_URL + '/servers', stream=True) as r:
+            return map(Struct, r.json())
+
+
+    def get_best_servers(self):
+        try:
+            for server in self.get_servers():
+                for technology in server.technologies:
+                    if technology.identifier in (TYPE_PROXY, TYPE_SOCKS_PROXY, TYPE_SSL_RROXY):
+                        if server not in self._servers + self._used_servers:
+                            self._servers.append(server)
+            self._servers = sorted(self._servers, key=lambda x: x.load)
+        except Exception:
+            raise
+        else:
+            self._init_done = True
+
+
+    def __getattribute__(self, item):
+
+        try:
+            return object.__getattribute__(self, item)
+        except AttributeError as e:
+            try:
+                return super().__getattribute__(item)
+            except AttributeError as e:
+                raise AttributeError
 
 
 class Struct(object):
-
+    from pprint import pformat
 
     def __init__(self, data):
         for name, value in data.items():
@@ -133,10 +238,25 @@ class Struct(object):
 
 
     def __repr__(self):
-        return pformat(
-            {k: v for k, v in self.__dict__.items()
-             if k[0] != '_'}, depth=4, indent=20, sort_dicts=True
-        )
+        return '<{0.__class__.__name__}({1})>'.format(
+            self, Struct.pformat({k: v for k, v in self.__dict__.items() if k[0] != '_'},
+                                 depth=4,
+                                 indent=20,
+                                 sort_dicts=True)[1:-1])
+
+
+    def __getitem__(self, item):
+        try:
+            return getattr(self, item)
+        except AttributeError:
+            raise KeyError
+
+
+    def __setitem__(self, item, val):
+        try:
+            setattr(self, item, val)
+        except AttributeError:
+            raise KeyError
 
 
 class Server(Struct):
