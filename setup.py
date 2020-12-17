@@ -50,6 +50,6 @@ setup(
     license='MIT',
     author='UltrafunkAmsterdam',
     author_email='',
-    install_requires=["aiohttp_socks","requests", "aiohttp"]
+    install_requires=["aiohttp_socks","requests", "aiohttp"],
     description='Drop-in for either requests.Session and aiohttp.ClientSession, which directly uses the Nord VPN Network'
 )
